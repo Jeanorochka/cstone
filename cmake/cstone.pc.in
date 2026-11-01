@@ -1,0 +1,10 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: Cstone
+Description: Standalone C11 multi-architecture assembler
+Version: @PROJECT_VERSION@
+Libs: -L"${libdir}" -lcstone
+Cflags: -I"${includedir}"

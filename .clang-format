@@ -1,4 +1,7 @@
-BasedOnStyle: WebKit
+BasedOnStyle: LLVM
 IndentWidth: 4
-UseTab: Never
-ColumnLimit: 120
+ColumnLimit: 110
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+BreakBeforeBraces: Attach

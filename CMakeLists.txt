@@ -1,97 +1,156 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.20)
+if(POLICY CMP0141)
+    cmake_policy(SET CMP0141 NEW)
+endif()
+project(Cstone VERSION 0.2.0 LANGUAGES C)
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+include(CTest)
 
-project(nyxstone VERSION 0.1.0)
+option(BUILD_SHARED_LIBS "Build a shared library" OFF)
+option(CSTONE_BUILD_CLI "Build the command line tool" ON)
+option(CSTONE_BUILD_EXAMPLES "Build API examples" ON)
+option(CSTONE_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
+option(CSTONE_SANITIZERS "Enable AddressSanitizer and UBSan" OFF)
+option(CSTONE_ADDRESS_SANITIZER "Enable AddressSanitizer only" OFF)
+option(CSTONE_FUZZ "Build the libFuzzer harness" OFF)
 
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
-    message(FATAL_ERROR "In-tree builds are not supported. Run CMake from a separate directory: cmake -B build")
+set(CSTONE_SOURCES src/cstone.c src/common.c src/relocation.c src/x86.c src/aarch64.c src/arm.c src/riscv.c src/mips.c)
+add_library(cstone ${CSTONE_SOURCES})
+add_library(Cstone::cstone ALIAS cstone)
+target_include_directories(cstone PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+set_target_properties(cstone PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 1 C_VISIBILITY_PRESET hidden POSITION_INDEPENDENT_CODE ON)
+if(BUILD_SHARED_LIBS)
+    target_compile_definitions(cstone PRIVATE CSTONE_BUILD PUBLIC CSTONE_SHARED)
 endif()
 
-set(PROJECT_IS_TOP_LEVEL OFF)
-if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
-    set(PROJECT_IS_TOP_LEVEL ON)
+function(cstone_defaults target)
+    set_target_properties(${target} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+    if(MSVC)
+        target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
+        target_compile_options(${target} PRIVATE /W4 /utf-8)
+        if(CSTONE_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE /WX)
+            target_link_options(${target} PRIVATE /WX)
+        endif()
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+        if(CSTONE_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE -Werror)
+        endif()
+    endif()
+    if(CSTONE_ADDRESS_SANITIZER)
+        if(MSVC)
+            set_property(TARGET ${target} PROPERTY MSVC_DEBUG_INFORMATION_FORMAT Embedded)
+            target_compile_options(${target} PRIVATE /fsanitize=address)
+            target_link_options(${target} PRIVATE /INCREMENTAL:NO /DEBUG)
+        else()
+            target_compile_options(${target} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+            target_link_options(${target} PRIVATE -fsanitize=address)
+        endif()
+    endif()
+    if(CSTONE_SANITIZERS)
+        if(MSVC OR WIN32)
+            message(FATAL_ERROR "The combined ASan/UBSan configuration requires a Unix GCC/Clang host")
+        endif()
+        target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    endif()
+endfunction()
+cstone_defaults(cstone)
 
-    # Enable folder support
-    set_property(GLOBAL PROPERTY USE_FOLDERS ON) 
+if(CSTONE_BUILD_CLI)
+    add_executable(cstone_cli src/cli.c)
+    set_target_properties(cstone_cli PROPERTIES OUTPUT_NAME cstone)
+    if(APPLE)
+        set_target_properties(cstone_cli PROPERTIES INSTALL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
+    elseif(UNIX)
+        set_target_properties(cstone_cli PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+    endif()
+    target_link_libraries(cstone_cli PRIVATE cstone)
+    cstone_defaults(cstone_cli)
+    if(WIN32 AND NOT MSVC)
+        target_link_options(cstone_cli PRIVATE -municode)
+    endif()
+    install(TARGETS cstone_cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+if(CSTONE_BUILD_EXAMPLES)
+    add_executable(cstone_demo examples/api_demo.c)
+    target_link_libraries(cstone_demo PRIVATE cstone)
+    cstone_defaults(cstone_demo)
+    add_executable(cstone_multi_demo examples/multi_arch.c)
+    target_link_libraries(cstone_multi_demo PRIVATE cstone)
+    cstone_defaults(cstone_multi_demo)
+endif()
+if(BUILD_TESTING)
+    add_executable(cstone_tests tests/test_cstone.c)
+    target_link_libraries(cstone_tests PRIVATE cstone)
+    cstone_defaults(cstone_tests)
+    add_test(NAME cstone_tests COMMAND cstone_tests)
+    set_tests_properties(cstone_tests PROPERTIES TIMEOUT 60)
+    add_executable(cstone_api_tests tests/test_api.c)
+    target_link_libraries(cstone_api_tests PRIVATE cstone)
+    cstone_defaults(cstone_api_tests)
+    add_test(NAME cstone_api_tests COMMAND cstone_api_tests)
+    add_library(cstone_fault OBJECT ${CSTONE_SOURCES})
+    target_include_directories(cstone_fault PRIVATE include)
+    target_compile_definitions(cstone_fault PRIVATE CSTONE_TEST_ALLOCATOR)
+    cstone_defaults(cstone_fault)
+    add_executable(cstone_allocation_tests tests/test_allocations.c $<TARGET_OBJECTS:cstone_fault>)
+    target_include_directories(cstone_allocation_tests PRIVATE include)
+    cstone_defaults(cstone_allocation_tests)
+    add_test(NAME cstone_allocation_tests COMMAND cstone_allocation_tests)
+    add_executable(cstone_fuzz_smoke tests/fuzz_smoke.c fuzz/fuzz_assemble.c)
+    target_link_libraries(cstone_fuzz_smoke PRIVATE cstone)
+    cstone_defaults(cstone_fuzz_smoke)
+    add_test(NAME cstone_fuzz_smoke COMMAND cstone_fuzz_smoke)
+    find_package(Threads REQUIRED)
+    add_executable(cstone_thread_tests tests/test_threads.c)
+    target_link_libraries(cstone_thread_tests PRIVATE cstone Threads::Threads)
+    cstone_defaults(cstone_thread_tests)
+    add_test(NAME cstone_thread_tests COMMAND cstone_thread_tests)
+    set_tests_properties(cstone_thread_tests PROPERTIES TIMEOUT 60)
+    find_package(Python3 3.10 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND AND CSTONE_BUILD_CLI)
+        add_test(NAME cstone_cli_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli.py --cstone $<TARGET_FILE:cstone_cli>)
+        set_tests_properties(cstone_cli_tests PROPERTIES TIMEOUT 60)
+    endif()
+    set_tests_properties(cstone_api_tests cstone_allocation_tests PROPERTIES TIMEOUT 60)
+    set_tests_properties(cstone_fuzz_smoke PROPERTIES TIMEOUT 120)
+    if(MSVC AND CSTONE_ADDRESS_SANITIZER)
+        get_filename_component(CSTONE_MSVC_BIN "${CMAKE_C_COMPILER}" DIRECTORY)
+        set_tests_properties(cstone_tests cstone_api_tests cstone_allocation_tests cstone_fuzz_smoke cstone_thread_tests PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CSTONE_MSVC_BIN}")
+        if(Python3_Interpreter_FOUND AND CSTONE_BUILD_CLI)
+            set_tests_properties(cstone_cli_tests PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CSTONE_MSVC_BIN}")
+        endif()
+    endif()
+endif()
+if(CSTONE_FUZZ)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang" OR WIN32)
+        message(FATAL_ERROR "libFuzzer configuration requires Clang on Unix")
+    endif()
+    target_compile_options(cstone PRIVATE -fsanitize=fuzzer-no-link,address,undefined)
+    target_link_options(cstone INTERFACE -fsanitize=address,undefined)
+    add_executable(cstone_fuzz fuzz/fuzz_assemble.c)
+    target_link_libraries(cstone_fuzz PRIVATE cstone)
+    target_compile_options(cstone_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+    target_link_options(cstone_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
 endif()
 
-option(NYXSTONE_BUILD_EXAMPLES "Build nyxstone examples" ${PROJECT_IS_TOP_LEVEL})
-option(NYXSTONE_SANITIZERS "Enable sanitizers" OFF)
+install(TARGETS cstone EXPORT CstoneTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES include/cstone.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(EXPORT CstoneTargets FILE CstoneTargets.cmake NAMESPACE Cstone:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Cstone)
+configure_package_config_file(cmake/CstoneConfig.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/CstoneConfig.cmake INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Cstone)
+write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/CstoneConfigVersion.cmake VERSION ${PROJECT_VERSION} COMPATIBILITY SameMinorVersion)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/CstoneConfig.cmake ${CMAKE_CURRENT_BINARY_DIR}/CstoneConfigVersion.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Cstone)
+configure_file(cmake/cstone.pc.in cstone.pc @ONLY)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/cstone.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+install(FILES README.md LICENSE CHANGELOG.md SECURITY.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/Cstone)
+install(DIRECTORY docs/ DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/Cstone/docs)
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-
-if(DEFINED ENV{NYXSTONE_LLVM_PREFIX})
-    # Ignore LLVM_ROOT and system search paths so that a user-supplied prefix
-    # is the only place find_package(LLVM ...) looks. Without these,
-    # find_package would walk system paths and could pick up a different
-    # LLVM version (e.g., a newer one matching the iterated version) instead
-    # of the one the user pinned.
-    set(CMAKE_FIND_USE_PACKAGE_ROOT_PATH OFF)
-    set(CMAKE_FIND_USE_CMAKE_SYSTEM_PATH OFF)
-    set(CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH OFF)
-    set(CMAKE_PREFIX_PATH $ENV{NYXSTONE_LLVM_PREFIX})
-endif()
-
-find_package(LLVM-Wrapper COMPONENTS
-    core
-    mc
-    object
-    AllTargetsCodeGens
-    AllTargetsAsmParsers
-    AllTargetsDescs
-    AllTargetsDisassemblers
-    AllTargetsInfos
-    AllTargetsMCAs
-)
-
-file(GLOB_RECURSE nyxstone_SOURCES
-    "src/*.cpp"
-    "src/*.h"
-    "include/*.h"
-    "include/*.hpp"
-)
-
-if(NYXSTONE_SANITIZERS)
-    add_compile_options(-fsanitize=address,undefined)
-    add_link_options(-fsanitize=address,undefined)
-endif()
-
-add_library(nyxstone ${nyxstone_SOURCES})
-add_library(nyxstone::nyxstone ALIAS nyxstone)
-
-target_compile_features(nyxstone PUBLIC
-    cxx_std_17
-)
-target_include_directories(nyxstone PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
-    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/vendor>
-)
-target_link_libraries(nyxstone PUBLIC
-    LLVM-Wrapper
-)
-set_target_properties(nyxstone PROPERTIES
-    COMPILE_PDB_NAME nyxstone-lib.pdb
-)
-
-if(NYXSTONE_BUILD_EXAMPLES)
-    add_executable(nyxstone-bin examples/nyxstone-cli.cpp)
-    set_target_properties(nyxstone-bin PROPERTIES
-        OUTPUT_NAME nyxstone
-    )
-    target_link_libraries(nyxstone-bin PRIVATE
-        nyxstone::nyxstone
-    )
-
-    add_executable(example examples/example.cpp)
-    target_link_libraries(example PRIVATE
-        nyxstone::nyxstone
-    )
-
-    add_executable(benchmark examples/benchmark.cpp)
-    target_link_libraries(benchmark PRIVATE
-        nyxstone::nyxstone
-    )
-
-    include(CTest)
-    add_test(NAME TestExample COMMAND $<TARGET_FILE:example>)
-    add_test(NAME TestCLI COMMAND "${CMAKE_CURRENT_LIST_DIR}/tool/test-cli.sh")
-endif()
+set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+set(CPACK_PACKAGE_NAME Cstone)
+set(CPACK_GENERATOR ZIP)
+set(CPACK_SOURCE_GENERATOR ZIP)
+set(CPACK_SOURCE_IGNORE_FILES "/work/;/build[^/]*/;/.git/;__pycache__;\\.pyc$")
+include(CPack)
