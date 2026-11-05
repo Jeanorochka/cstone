@@ -3,7 +3,7 @@
 # Cstone
 
 A standalone C11 assembler library that turns assembly text into machine code, labels, and relocations. Cstone includes a C API and a command-line tool, with no LLVM, Keystone, or other third-party runtime dependencies in its core.
-
+Forked from: https://github.com/emproof-com/nyxstone. I only rewrote it to standalone independant lib.
 [![CI](https://github.com/Jeanorochka/cstone/actions/workflows/ci.yml/badge.svg)](https://github.com/Jeanorochka/cstone/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
